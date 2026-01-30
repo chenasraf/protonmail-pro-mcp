@@ -1,22 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * 🌟 The Sirency Collective - Ultimate Proton Mail MCP Server
- * 
- * The most comprehensive Proton Mail MCP server ever created.
- * Built by The Sirency Collective for legendary email management.
- * 
+ * Proton Mail MCP Server
+ *
+ * A secure MCP server for Proton Mail with read-only mode support.
+ *
  * Features:
- * ✅ Advanced email sending (SMTP) with templates & scheduling
- * ✅ Complete email reading (IMAP) via Proton Bridge
- * ✅ Comprehensive email statistics & analytics
- * ✅ Folder and label management
- * ✅ Contact management with interaction tracking
- * ✅ Email search with advanced filters
- * ✅ Attachment handling
- * ✅ Email threading and conversation management
- * ✅ Real-time synchronization
- * ✅ Performance monitoring and logging
+ * - Email reading (IMAP) via Proton Bridge
+ * - Email search with advanced filters
+ * - Email statistics & analytics
+ * - Folder management
+ * - Optional: Email sending (disabled in read-only mode)
+ *
+ * Security: Set READ_ONLY_MODE=true to disable all write operations
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -32,26 +28,32 @@ import { ProtonMailConfig } from './types/index.js';
 import { SMTPService } from './services/smtp-service.js';
 import { SimpleIMAPService } from './services/simple-imap-service.js';
 import { AnalyticsService } from './services/analytics-service.js';
-import { logger, Logger } from './utils/logger.js';
-import { parseEmails, isValidEmail } from './utils/helpers.js';
+import { logger } from './utils/logger.js';
 
 // Environment configuration
 const PROTONMAIL_USERNAME = process.env.PROTONMAIL_USERNAME;
 const PROTONMAIL_PASSWORD = process.env.PROTONMAIL_PASSWORD;
-const PROTONMAIL_SMTP_HOST = process.env.PROTONMAIL_SMTP_HOST || "smtp.protonmail.ch";
-const PROTONMAIL_SMTP_PORT = parseInt(process.env.PROTONMAIL_SMTP_PORT || "587", 10);
-const PROTONMAIL_IMAP_HOST = process.env.PROTONMAIL_IMAP_HOST || "localhost";
+const PROTONMAIL_SMTP_HOST = process.env.PROTONMAIL_SMTP_HOST || "127.0.0.1";
+const PROTONMAIL_SMTP_PORT = parseInt(process.env.PROTONMAIL_SMTP_PORT || "1025", 10);
+const PROTONMAIL_IMAP_HOST = process.env.PROTONMAIL_IMAP_HOST || "127.0.0.1";
 const PROTONMAIL_IMAP_PORT = parseInt(process.env.PROTONMAIL_IMAP_PORT || "1143", 10);
 const DEBUG = process.env.DEBUG === "true";
+const READ_ONLY_MODE = process.env.READ_ONLY_MODE !== "false"; // Default: true (safe)
 
 // Validate required environment variables
 if (!PROTONMAIL_USERNAME || !PROTONMAIL_PASSWORD) {
-  console.error("❌ [Sirency-ProtonMail] Missing required environment variables: PROTONMAIL_USERNAME and PROTONMAIL_PASSWORD must be set");
+  console.error("Missing required environment variables: PROTONMAIL_USERNAME and PROTONMAIL_PASSWORD");
   process.exit(1);
 }
 
 // Configure logger
 logger.setDebugMode(DEBUG);
+
+if (READ_ONLY_MODE) {
+  logger.info("Running in READ-ONLY mode - send/delete operations disabled", "MCPServer");
+} else {
+  logger.warn("Running in FULL ACCESS mode - send/delete operations enabled", "MCPServer");
+}
 
 // Create configuration
 const config: ProtonMailConfig = {
@@ -65,7 +67,7 @@ const config: ProtonMailConfig = {
   imap: {
     host: PROTONMAIL_IMAP_HOST,
     port: PROTONMAIL_IMAP_PORT,
-    secure: false, // Proton Bridge uses localhost without TLS
+    secure: false,
     username: PROTONMAIL_USERNAME,
     password: PROTONMAIL_PASSWORD,
   },
@@ -73,7 +75,7 @@ const config: ProtonMailConfig = {
   cacheEnabled: true,
   analyticsEnabled: true,
   autoSync: true,
-  syncInterval: 5 // minutes
+  syncInterval: 5
 };
 
 // Initialize services
@@ -81,12 +83,157 @@ const smtpService = new SMTPService(config);
 const imapService = new SimpleIMAPService();
 const analyticsService = new AnalyticsService();
 
-/**
- * Create MCP server with comprehensive email management capabilities
- */
+// Tool definitions
+const READ_ONLY_TOOLS = [
+  {
+    name: "get_emails",
+    description: "Get emails from a folder with pagination",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folder: { type: "string", description: "Folder name (default: INBOX)", default: "INBOX" },
+        limit: { type: "number", description: "Number of emails to fetch (default: 20)", default: 20 },
+        offset: { type: "number", description: "Pagination offset", default: 0 }
+      }
+    }
+  },
+  {
+    name: "get_email_by_id",
+    description: "Get a specific email by its ID",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "Email ID to retrieve" }
+      },
+      required: ["emailId"]
+    }
+  },
+  {
+    name: "search_emails",
+    description: "Search emails with filters",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Text to search for in subject/body" },
+        folder: { type: "string", description: "Folder to search in" },
+        from: { type: "string", description: "Filter by sender" },
+        to: { type: "string", description: "Filter by recipient" },
+        subject: { type: "string", description: "Filter by subject" },
+        isRead: { type: "boolean", description: "Filter by read status" },
+        isStarred: { type: "boolean", description: "Filter starred emails" },
+        dateFrom: { type: "string", description: "Start date (ISO format)" },
+        dateTo: { type: "string", description: "End date (ISO format)" },
+        limit: { type: "number", description: "Max results (default: 50)", default: 50 }
+      }
+    }
+  },
+  {
+    name: "get_folders",
+    description: "Get all email folders",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "get_email_stats",
+    description: "Get email statistics",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "get_contacts",
+    description: "Get contact list with interaction counts",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max contacts to return", default: 50 }
+      }
+    }
+  },
+  {
+    name: "get_connection_status",
+    description: "Check IMAP connection status",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "sync_emails",
+    description: "Sync emails from server",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folder: { type: "string", description: "Folder to sync (default: INBOX)" }
+      }
+    }
+  }
+];
+
+const WRITE_TOOLS = [
+  {
+    name: "send_email",
+    description: "Send an email",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient email address(es), comma-separated" },
+        cc: { type: "string", description: "CC recipients, comma-separated" },
+        bcc: { type: "string", description: "BCC recipients, comma-separated" },
+        subject: { type: "string", description: "Email subject" },
+        body: { type: "string", description: "Email body content" },
+        isHtml: { type: "boolean", description: "Whether body is HTML", default: false }
+      },
+      required: ["to", "subject", "body"]
+    }
+  },
+  {
+    name: "delete_email",
+    description: "Delete an email",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "Email ID to delete" }
+      },
+      required: ["emailId"]
+    }
+  },
+  {
+    name: "move_email",
+    description: "Move email to a different folder",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "Email ID" },
+        targetFolder: { type: "string", description: "Target folder name" }
+      },
+      required: ["emailId", "targetFolder"]
+    }
+  },
+  {
+    name: "mark_email_read",
+    description: "Mark email as read/unread",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "Email ID" },
+        isRead: { type: "boolean", description: "Read status", default: true }
+      },
+      required: ["emailId"]
+    }
+  },
+  {
+    name: "star_email",
+    description: "Star/unstar an email",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "Email ID" },
+        isStarred: { type: "boolean", description: "Star status", default: true }
+      },
+      required: ["emailId"]
+    }
+  }
+];
+
+// Create MCP server
 const server = new Server(
   {
-    name: "sirency-protonmail-ultimate-mcp",
+    name: "protonmail-mcp",
     version: "1.0.0",
   },
   {
@@ -96,286 +243,286 @@ const server = new Server(
   }
 );
 
-/**
- * List all available tools - The Ultimate Proton Mail Toolkit
- */
+// List available tools based on mode
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  logger.debug("Listing available tools", "MCPServer");
-  
-  return {
-    tools: [
-      // 📧 EMAIL SENDING TOOLS
-      {
-        name: "send_email",
-        description: "🚀 Send email with advanced options (templates, scheduling, attachments)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            to: { type: "string", description: "Recipient email address(es), comma-separated" },
-            cc: { type: "string", description: "CC recipients, comma-separated" },
-            bcc: { type: "string", description: "BCC recipients, comma-separated" },
-            subject: { type: "string", description: "Email subject" },
-            body: { type: "string", description: "Email body content" },
-            isHtml: { type: "boolean", description: "Whether body is HTML", default: false },
-            priority: { type: "string", enum: ["high", "normal", "low"], description: "Email priority" },
-            replyTo: { type: "string", description: "Reply-to email address" },
-            attachments: { type: "array", description: "File attachments (base64 encoded)" }
-          },
-          required: ["to", "subject", "body"]
-        }
-      },
-      {
-        name: "send_test_email",
-        description: "🧪 Send a test email to verify SMTP functionality",
-        inputSchema: {
-          type: "object",
-          properties: {
-            to: { type: "string", description: "Test recipient email address" },
-            customMessage: { type: "string", description: "Custom test message" }
-          },
-          required: ["to"]
-        }
-      },
+  const tools = READ_ONLY_MODE
+    ? READ_ONLY_TOOLS
+    : [...READ_ONLY_TOOLS, ...WRITE_TOOLS];
 
-      // 📬 EMAIL READING TOOLS
-      {
-        name: "get_emails",
-        description: "📬 Get emails from a specific folder with pagination",
-        inputSchema: {
-          type: "object",
-          properties: {
-            folder: { type: "string", description: "Folder name (default: INBOX)", default: "INBOX" },
-            limit: { type: "number", description: "Number of emails to fetch", default: 50 },
-            offset: { type: "number", description: "Pagination offset", default: 0 }
-          }
-        }
-      },
-      {
-        name: "get_email_by_id",
-        description: "📧 Get a specific email by its ID",
-        inputSchema: {
-          type: "object",
-          properties: {
-            emailId: { type: "string", description: "Email ID to retrieve" }
-          },
-          required: ["emailId"]
-        }
-      },
-      {
-        name: "search_emails",
-        description: "🔍 Search emails with advanced filters",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "Search query" },
-            folder: { type: "string", description: "Folder to search in" },
-            from: { type: "string", description: "Filter by sender" },
-            to: { type: "string", description: "Filter by recipient" },
-            subject: { type: "string", description: "Filter by subject" },
-            hasAttachment: { type: "boolean", description: "Filter emails with attachments" },
-            isRead: { type: "boolean", description: "Filter by read status" },
-            isStarred: { type: "boolean", description: "Filter starred emails" },
-            dateFrom: { type: "string", description: "Start date (ISO format)" },
-            dateTo: { type: "string", description: "End date (ISO format)" },
-            limit: { type: "number", description: "Max results", default: 100 }
-          }
-        }
-      },
-
-      // 📁 FOLDER MANAGEMENT TOOLS
-      {
-        name: "get_folders",
-        description: "📁 Get all email folders with statistics",
-        inputSchema: { type: "object", properties: {} }
-      },
-      {
-        name: "sync_folders",
-        description: "🔄 Synchronize folder structure from server",
-        inputSchema: { type: "object", properties: {} }
-      },
-
-      // ⚡ EMAIL ACTIONS
-      {
-        name: "mark_email_read",
-        description: "✅ Mark email as read/unread",
-        inputSchema: {
-          type: "object",
-          properties: {
-            emailId: { type: "string", description: "Email ID" },
-            isRead: { type: "boolean", description: "Read status", default: true }
-          },
-          required: ["emailId"]
-        }
-      },
-      {
-        name: "star_email",
-        description: "⭐ Star/unstar email",
-        inputSchema: {
-          type: "object",
-          properties: {
-            emailId: { type: "string", description: "Email ID" },
-            isStarred: { type: "boolean", description: "Star status", default: true }
-          },
-          required: ["emailId"]
-        }
-      },
-      {
-        name: "move_email",
-        description: "📦 Move email to different folder",
-        inputSchema: {
-          type: "object",
-          properties: {
-            emailId: { type: "string", description: "Email ID" },
-            targetFolder: { type: "string", description: "Target folder name" }
-          },
-          required: ["emailId", "targetFolder"]
-        }
-      },
-      {
-        name: "delete_email",
-        description: "🗑️ Delete email permanently",
-        inputSchema: {
-          type: "object",
-          properties: {
-            emailId: { type: "string", description: "Email ID to delete" }
-          },
-          required: ["emailId"]
-        }
-      },
-
-      // 📊 ANALYTICS & STATISTICS TOOLS
-      {
-        name: "get_email_stats",
-        description: "📊 Get comprehensive email statistics",
-        inputSchema: { type: "object", properties: {} }
-      },
-      {
-        name: "get_email_analytics",
-        description: "📈 Get advanced email analytics and insights",
-        inputSchema: { type: "object", properties: {} }
-      },
-      {
-        name: "get_contacts",
-        description: "👥 Get contact information with interaction statistics",
-        inputSchema: {
-          type: "object",
-          properties: {
-            limit: { type: "number", description: "Max contacts to return", default: 100 }
-          }
-        }
-      },
-      {
-        name: "get_volume_trends",
-        description: "📉 Get email volume trends over time",
-        inputSchema: {
-          type: "object",
-          properties: {
-            days: { type: "number", description: "Number of days to analyze", default: 30 }
-          }
-        }
-      },
-
-      // 🔧 SYSTEM & MAINTENANCE TOOLS
-      {
-        name: "get_connection_status",
-        description: "🔌 Check SMTP and IMAP connection status",
-        inputSchema: { type: "object", properties: {} }
-      },
-      {
-        name: "sync_emails",
-        description: "🔄 Manually sync emails from server",
-        inputSchema: {
-          type: "object",
-          properties: {
-            folder: { type: "string", description: "Folder to sync (default: all)" },
-            full: { type: "boolean", description: "Full sync vs incremental", default: false }
-          }
-        }
-      },
-      {
-        name: "clear_cache",
-        description: "🧹 Clear email cache and analytics cache",
-        inputSchema: { type: "object", properties: {} }
-      },
-      {
-        name: "get_logs",
-        description: "📋 Get recent system logs",
-        inputSchema: {
-          type: "object",
-          properties: {
-            level: { type: "string", enum: ["debug", "info", "warn", "error"], description: "Log level filter" },
-            limit: { type: "number", description: "Max log entries", default: 100 }
-          }
-        }
-      }
-    ]
-  };
+  logger.debug(`Listing ${tools.length} tools (read-only: ${READ_ONLY_MODE})`, "MCPServer");
+  return { tools };
 });
 
-// Note: The full tool handler implementation is available in the complete source code
-// This version shows the architecture and tool definitions for GitHub display
+// Handle tool calls
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
 
-/**
- * Main server startup function
- */
-async function main() {
-  logger.info("🌟 Starting Sirency Ultimate Proton Mail MCP Server...", "MCPServer");
-  
+  logger.debug(`Tool called: ${name}`, "MCPServer");
+
+  // Block write operations in read-only mode
+  const writeOps = ["send_email", "delete_email", "move_email", "mark_email_read", "star_email"];
+  if (READ_ONLY_MODE && writeOps.includes(name)) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Operation "${name}" is disabled in read-only mode. Set READ_ONLY_MODE=false to enable.`
+    );
+  }
+
   try {
-    // Verify SMTP connection
-    logger.info("🔗 Verifying SMTP connection...", "MCPServer");
-    await smtpService.verifyConnection();
-    logger.info("✅ SMTP connection verified", "MCPServer");
-    
-    // Try to connect to IMAP (Proton Bridge)
-    logger.info("🔗 Connecting to IMAP (Proton Bridge)...", "MCPServer");
+    switch (name) {
+      // === READ OPERATIONS ===
+
+      case "get_emails": {
+        const folder = (args?.folder as string) || "INBOX";
+        const limit = (args?.limit as number) || 20;
+        const offset = (args?.offset as number) || 0;
+
+        const emails = await imapService.getEmails(folder, limit, offset);
+        analyticsService.updateWithEmails(emails);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              folder,
+              count: emails.length,
+              emails: emails.map(e => ({
+                id: e.id,
+                from: e.from,
+                to: e.to,
+                subject: e.subject,
+                date: e.date,
+                isRead: e.isRead,
+                isStarred: e.isStarred,
+                preview: e.body.substring(0, 200)
+              }))
+            }, null, 2)
+          }]
+        };
+      }
+
+      case "get_email_by_id": {
+        const emailId = args?.emailId as string;
+        if (!emailId) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId is required");
+        }
+
+        const email = await imapService.getEmailById(emailId);
+        if (!email) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ error: "Email not found" }) }]
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(email, null, 2) }]
+        };
+      }
+
+      case "search_emails": {
+        const searchOptions = {
+          query: args?.query as string | undefined,
+          folder: args?.folder as string | undefined,
+          from: args?.from as string | undefined,
+          to: args?.to as string | undefined,
+          subject: args?.subject as string | undefined,
+          isRead: args?.isRead as boolean | undefined,
+          isStarred: args?.isStarred as boolean | undefined,
+          dateFrom: args?.dateFrom ? new Date(args.dateFrom as string) : undefined,
+          dateTo: args?.dateTo ? new Date(args.dateTo as string) : undefined,
+          limit: (args?.limit as number) || 50
+        };
+
+        const emails = await imapService.searchEmails(searchOptions);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              count: emails.length,
+              emails: emails.map(e => ({
+                id: e.id,
+                from: e.from,
+                subject: e.subject,
+                date: e.date,
+                preview: e.body.substring(0, 200)
+              }))
+            }, null, 2)
+          }]
+        };
+      }
+
+      case "get_folders": {
+        const folders = await imapService.getFolders();
+        return {
+          content: [{ type: "text", text: JSON.stringify({ folders }, null, 2) }]
+        };
+      }
+
+      case "get_email_stats": {
+        const stats = analyticsService.getStats();
+        return {
+          content: [{ type: "text", text: JSON.stringify(stats, null, 2) }]
+        };
+      }
+
+      case "get_contacts": {
+        const limit = (args?.limit as number) || 50;
+        const contacts = analyticsService.getContacts(limit);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ contacts }, null, 2) }]
+        };
+      }
+
+      case "get_connection_status": {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              imap: imapService.isConnectionActive(),
+              smtp: READ_ONLY_MODE ? "disabled (read-only mode)" : smtpService.isConnectionActive(),
+              readOnlyMode: READ_ONLY_MODE
+            }, null, 2)
+          }]
+        };
+      }
+
+      case "sync_emails": {
+        const folder = (args?.folder as string) || "INBOX";
+        await imapService.syncFolder(folder);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ synced: folder }) }]
+        };
+      }
+
+      // === WRITE OPERATIONS (blocked in read-only mode) ===
+
+      case "send_email": {
+        const result = await smtpService.sendEmail({
+          to: args?.to as string,
+          cc: args?.cc as string | undefined,
+          bcc: args?.bcc as string | undefined,
+          subject: args?.subject as string,
+          body: args?.body as string,
+          isHtml: args?.isHtml as boolean | undefined
+        });
+
+        logger.info(`Email sent: ${result.messageId}`, "MCPServer");
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ success: true, messageId: result.messageId })
+          }]
+        };
+      }
+
+      case "delete_email": {
+        const emailId = args?.emailId as string;
+        await imapService.deleteEmail(emailId);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ deleted: emailId }) }]
+        };
+      }
+
+      case "move_email": {
+        const emailId = args?.emailId as string;
+        const targetFolder = args?.targetFolder as string;
+        await imapService.moveEmail(emailId, targetFolder);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ moved: emailId, to: targetFolder }) }]
+        };
+      }
+
+      case "mark_email_read": {
+        const emailId = args?.emailId as string;
+        const isRead = args?.isRead !== false;
+        await imapService.markAsRead(emailId, isRead);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ emailId, isRead }) }]
+        };
+      }
+
+      case "star_email": {
+        const emailId = args?.emailId as string;
+        const isStarred = args?.isStarred !== false;
+        await imapService.starEmail(emailId, isStarred);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ emailId, isStarred }) }]
+        };
+      }
+
+      default:
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+    }
+  } catch (error) {
+    if (error instanceof McpError) throw error;
+
+    logger.error(`Tool error: ${name}`, "MCPServer", error);
+    throw new McpError(
+      ErrorCode.InternalError,
+      `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+});
+
+// Main startup
+async function main() {
+  logger.info("Starting Proton Mail MCP Server...", "MCPServer");
+
+  try {
+    // Connect to IMAP (Proton Bridge)
+    logger.info("Connecting to IMAP...", "MCPServer");
     try {
       await imapService.connect();
-      logger.info("✅ IMAP connection established", "MCPServer");
+      logger.info("IMAP connected", "MCPServer");
     } catch (imapError) {
-      logger.warn("⚠️ IMAP connection failed - email reading features will be limited", "MCPServer", imapError);
-      logger.info("💡 Make sure Proton Bridge is running on localhost:1143", "MCPServer");
+      logger.warn("IMAP connection failed - make sure Proton Bridge is running", "MCPServer", imapError);
     }
-    
-    // Start the MCP server
+
+    // Verify SMTP only if not in read-only mode
+    if (!READ_ONLY_MODE) {
+      logger.info("Verifying SMTP connection...", "MCPServer");
+      try {
+        await smtpService.verifyConnection();
+        logger.info("SMTP connected", "MCPServer");
+      } catch (smtpError) {
+        logger.warn("SMTP connection failed", "MCPServer", smtpError);
+      }
+    }
+
+    // Start MCP server
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    
-    logger.info("🚀 Sirency Ultimate Proton Mail MCP Server started successfully!", "MCPServer");
-    logger.info("🌟 All email management features are now available", "MCPServer");
-    
+
+    logger.info(`MCP Server started (read-only: ${READ_ONLY_MODE})`, "MCPServer");
+
   } catch (error) {
-    logger.error("❌ Server startup failed", "MCPServer", error);
+    logger.error("Server startup failed", "MCPServer", error);
     process.exit(1);
   }
 }
 
-// Error handling and graceful shutdown
-process.on("uncaughtException", (error) => {
-  logger.error("💥 Uncaught exception", "MCPServer", error);
-  process.exit(1);
-});
-
-process.on("unhandledRejection", (reason) => {
-  logger.error("💥 Unhandled rejection", "MCPServer", reason);
-  process.exit(1);
-});
-
+// Graceful shutdown
 process.on("SIGINT", async () => {
-  logger.info("📡 Received SIGINT, shutting down gracefully...", "MCPServer");
+  logger.info("Shutting down...", "MCPServer");
   try {
     await imapService.disconnect();
-    await smtpService.close();
-    logger.info("👋 Server shutdown complete", "MCPServer");
+    if (!READ_ONLY_MODE) await smtpService.close();
     process.exit(0);
   } catch (error) {
-    logger.error("❌ Error during shutdown", "MCPServer", error);
     process.exit(1);
   }
 });
 
-// Start the server
-main().catch((error) => {
-  logger.error("💥 Fatal server error", "MCPServer", error);
+process.on("uncaughtException", (error) => {
+  logger.error("Uncaught exception", "MCPServer", error);
   process.exit(1);
 });
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("Unhandled rejection", "MCPServer", reason);
+  process.exit(1);
+});
+
+main();
