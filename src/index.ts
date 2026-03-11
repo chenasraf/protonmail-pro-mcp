@@ -37,6 +37,9 @@ const PROTONMAIL_SMTP_HOST = process.env.PROTONMAIL_SMTP_HOST || "127.0.0.1";
 const PROTONMAIL_SMTP_PORT = parseInt(process.env.PROTONMAIL_SMTP_PORT || "1025", 10);
 const PROTONMAIL_IMAP_HOST = process.env.PROTONMAIL_IMAP_HOST || "127.0.0.1";
 const PROTONMAIL_IMAP_PORT = parseInt(process.env.PROTONMAIL_IMAP_PORT || "1143", 10);
+const PROTONMAIL_SMTP_SECURE = process.env.PROTONMAIL_SMTP_SECURE != null
+  ? process.env.PROTONMAIL_SMTP_SECURE === "true"
+  : PROTONMAIL_SMTP_PORT === 465;
 const DEBUG = process.env.DEBUG === "true";
 const READ_ONLY_MODE = process.env.READ_ONLY_MODE !== "false"; // Default: true (safe)
 
@@ -60,7 +63,7 @@ const config: ProtonMailConfig = {
   smtp: {
     host: PROTONMAIL_SMTP_HOST,
     port: PROTONMAIL_SMTP_PORT,
-    secure: PROTONMAIL_SMTP_PORT === 465,
+    secure: PROTONMAIL_SMTP_SECURE,
     username: PROTONMAIL_USERNAME,
     password: PROTONMAIL_PASSWORD,
   },
@@ -194,7 +197,7 @@ const WRITE_TOOLS = [
   },
   {
     name: "move_email",
-    description: "Move email to a different folder",
+    description: "Move email to a different folder. This REMOVES the email from its current folder and places it in the target folder. In ProtonMail, this replaces all existing labels with the target one. To add a label without removing existing ones, use label_email instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -202,6 +205,30 @@ const WRITE_TOOLS = [
         targetFolder: { type: "string", description: "Target folder name" }
       },
       required: ["emailId", "targetFolder"]
+    }
+  },
+  {
+    name: "label_email",
+    description: "Add a label to an email WITHOUT removing it from its current folder. In ProtonMail, labels are represented as IMAP folders. This copies the email to the label folder so it appears under both the original location and the new label. Use this when the user wants to tag/label/categorize an email.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "Email ID" },
+        label: { type: "string", description: "Label (folder) name to add" }
+      },
+      required: ["emailId", "label"]
+    }
+  },
+  {
+    name: "unlabel_email",
+    description: "Remove a label from an email. This deletes the email's copy from the specified label folder without affecting other copies. Use this when the user wants to remove a tag/label from an email.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "Email ID" },
+        label: { type: "string", description: "Label (folder) name to remove" }
+      },
+      required: ["emailId", "label"]
     }
   },
   {
@@ -260,7 +287,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   logger.debug(`Tool called: ${name}`, "MCPServer");
 
   // Block write operations in read-only mode
-  const writeOps = ["send_email", "delete_email", "move_email", "mark_email_read", "star_email"];
+  const writeOps = ["send_email", "delete_email", "move_email", "label_email", "unlabel_email", "mark_email_read", "star_email"];
   if (READ_ONLY_MODE && writeOps.includes(name)) {
     throw new McpError(
       ErrorCode.InvalidRequest,
@@ -431,6 +458,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         await imapService.moveEmail(emailId, targetFolder);
         return {
           content: [{ type: "text", text: JSON.stringify({ moved: emailId, to: targetFolder }) }]
+        };
+      }
+
+      case "label_email": {
+        const emailId = args?.emailId as string;
+        const label = args?.label as string;
+        await imapService.labelEmail(emailId, label);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ emailId, labelAdded: label }) }]
+        };
+      }
+
+      case "unlabel_email": {
+        const emailId = args?.emailId as string;
+        const label = args?.label as string;
+        await imapService.unlabelEmail(emailId, label);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ emailId, labelRemoved: label }) }]
         };
       }
 

@@ -13,6 +13,7 @@ export class SimpleIMAPService {
   private isConnected: boolean = false;
   private emailCache: Map<string, Email> = new Map();
   private folderCache: Folder[] = [];
+  private mailboxPaths: Map<string, string> = new Map(); // name -> IMAP path
 
   async connect(): Promise<void> {
     const host = process.env.PROTONMAIL_IMAP_HOST || 'localhost';
@@ -38,11 +39,65 @@ export class SimpleIMAPService {
       await this.client.connect();
       this.isConnected = true;
       logger.info('IMAP connection established', 'IMAPService');
+
+      // Discover all mailbox paths for name resolution
+      await this.refreshMailboxPaths();
     } catch (error) {
       this.isConnected = false;
       logger.error('IMAP connection failed', 'IMAPService', error);
       throw error;
     }
+  }
+
+  private async refreshMailboxPaths(): Promise<void> {
+    if (!this.client || !this.isConnected) return;
+
+    try {
+      const mailboxes = await this.client.list();
+      this.mailboxPaths.clear();
+
+      for (const mb of mailboxes) {
+        // Store by full path
+        this.mailboxPaths.set(mb.path, mb.path);
+        // Store by name (last segment) for shorthand lookup
+        this.mailboxPaths.set(mb.name, mb.path);
+        // Store lowercase variants for case-insensitive matching
+        this.mailboxPaths.set(mb.path.toLowerCase(), mb.path);
+        this.mailboxPaths.set(mb.name.toLowerCase(), mb.path);
+      }
+
+      logger.info(`Discovered ${mailboxes.length} mailboxes`, 'IMAPService');
+      logger.debug(`Mailbox paths: ${Array.from(new Set(this.mailboxPaths.values())).join(', ')}`, 'IMAPService');
+    } catch (error) {
+      logger.warn('Failed to discover mailbox paths', 'IMAPService', error);
+    }
+  }
+
+  /**
+   * Resolve a folder/label name to its actual IMAP path.
+   * Tries exact match, then case-insensitive, then common Proton Bridge prefixes.
+   */
+  resolveMailboxPath(name: string): string {
+    // Exact match
+    if (this.mailboxPaths.has(name)) {
+      return this.mailboxPaths.get(name)!;
+    }
+    // Case-insensitive
+    if (this.mailboxPaths.has(name.toLowerCase())) {
+      return this.mailboxPaths.get(name.toLowerCase())!;
+    }
+    // Try common Proton Bridge prefixes
+    for (const prefix of ['Labels/', 'Folders/']) {
+      const prefixed = prefix + name;
+      if (this.mailboxPaths.has(prefixed)) {
+        return this.mailboxPaths.get(prefixed)!;
+      }
+      if (this.mailboxPaths.has(prefixed.toLowerCase())) {
+        return this.mailboxPaths.get(prefixed.toLowerCase())!;
+      }
+    }
+    // Fall back to the name as-is
+    return name;
   }
 
   async disconnect(): Promise<void> {
@@ -65,6 +120,8 @@ export class SimpleIMAPService {
 
     try {
       const mailboxes = await this.client.list();
+      // Refresh path mappings while we're at it
+      await this.refreshMailboxPaths();
       this.folderCache = mailboxes.map(mb => ({
         name: mb.name,
         path: mb.path,
@@ -224,28 +281,164 @@ export class SimpleIMAPService {
   }
 
   async markAsRead(emailId: string, isRead: boolean = true): Promise<void> {
-    logger.info(`Mark as read not fully implemented: ${emailId} -> ${isRead}`, 'IMAPService');
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
     const email = this.emailCache.get(emailId);
-    if (email) {
-      email.isRead = isRead;
+    const folder = email?.folder || 'INBOX';
+    const uid = parseInt(emailId, 10);
+
+    try {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        if (isRead) {
+          await this.client.messageFlagsAdd({ uid }, ['\\Seen'], { uid: true });
+        } else {
+          await this.client.messageFlagsRemove({ uid }, ['\\Seen'], { uid: true });
+        }
+        if (email) {
+          email.isRead = isRead;
+        }
+        logger.info(`Marked email ${emailId} as ${isRead ? 'read' : 'unread'}`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to mark email ${emailId} as ${isRead ? 'read' : 'unread'}`, 'IMAPService', error);
+      throw error;
     }
   }
 
   async starEmail(emailId: string, isStarred: boolean = true): Promise<void> {
-    logger.info(`Star email not fully implemented: ${emailId} -> ${isStarred}`, 'IMAPService');
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
     const email = this.emailCache.get(emailId);
-    if (email) {
-      email.isStarred = isStarred;
+    const folder = email?.folder || 'INBOX';
+    const uid = parseInt(emailId, 10);
+
+    try {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        if (isStarred) {
+          await this.client.messageFlagsAdd({ uid }, ['\\Flagged'], { uid: true });
+        } else {
+          await this.client.messageFlagsRemove({ uid }, ['\\Flagged'], { uid: true });
+        }
+        if (email) {
+          email.isStarred = isStarred;
+        }
+        logger.info(`${isStarred ? 'Starred' : 'Unstarred'} email ${emailId}`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to ${isStarred ? 'star' : 'unstar'} email ${emailId}`, 'IMAPService', error);
+      throw error;
+    }
+  }
+
+  async labelEmail(emailId: string, label: string): Promise<void> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
+    const email = this.emailCache.get(emailId);
+    const sourceFolder = this.resolveMailboxPath(email?.folder || 'INBOX');
+    const resolvedLabel = this.resolveMailboxPath(label);
+    const uid = parseInt(emailId, 10);
+
+    try {
+      const lock = await this.client.getMailboxLock(sourceFolder);
+      try {
+        await this.client.messageCopy({ uid }, resolvedLabel, { uid: true });
+        logger.info(`Labeled email ${emailId} with ${resolvedLabel} (copied from ${sourceFolder})`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to label email ${emailId} with ${label} (resolved: ${resolvedLabel})`, 'IMAPService', error);
+      throw error;
+    }
+  }
+
+  async unlabelEmail(emailId: string, label: string): Promise<void> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
+    const resolvedLabel = this.resolveMailboxPath(label);
+    const uid = parseInt(emailId, 10);
+
+    try {
+      const lock = await this.client.getMailboxLock(resolvedLabel);
+      try {
+        await this.client.messageDelete({ uid }, { uid: true });
+        logger.info(`Removed label ${resolvedLabel} from email ${emailId}`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to remove label ${label} (resolved: ${resolvedLabel}) from email ${emailId}`, 'IMAPService', error);
+      throw error;
     }
   }
 
   async moveEmail(emailId: string, targetFolder: string): Promise<void> {
-    logger.info(`Move email not fully implemented: ${emailId} -> ${targetFolder}`, 'IMAPService');
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
+    const email = this.emailCache.get(emailId);
+    const sourceFolder = this.resolveMailboxPath(email?.folder || 'INBOX');
+    const resolvedTarget = this.resolveMailboxPath(targetFolder);
+    const uid = parseInt(emailId, 10);
+
+    try {
+      // Use COPY (not MOVE or copy+delete) to change folders.
+      // In Proton Bridge, COPY to a folder moves the message to that folder
+      // (since a message can only be in one folder) while preserving labels.
+      // MOVE or delete would strip labels.
+      const lock = await this.client.getMailboxLock(sourceFolder);
+      try {
+        await this.client.messageCopy({ uid }, resolvedTarget, { uid: true });
+        if (email) {
+          email.folder = resolvedTarget;
+        }
+        logger.info(`Moved email ${emailId} from ${sourceFolder} to ${resolvedTarget} (copy to preserve labels)`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to move email ${emailId} to ${targetFolder} (resolved: ${resolvedTarget})`, 'IMAPService', error);
+      throw error;
+    }
   }
 
   async deleteEmail(emailId: string): Promise<void> {
-    logger.info(`Delete email not fully implemented: ${emailId}`, 'IMAPService');
-    this.emailCache.delete(emailId);
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
+    const email = this.emailCache.get(emailId);
+    const folder = email?.folder || 'INBOX';
+    const uid = parseInt(emailId, 10);
+
+    try {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        await this.client.messageDelete({ uid }, { uid: true });
+        this.emailCache.delete(emailId);
+        logger.info(`Deleted email ${emailId}`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to delete email ${emailId}`, 'IMAPService', error);
+      throw error;
+    }
   }
 
   async syncFolder(folder: string): Promise<void> {

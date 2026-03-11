@@ -24,7 +24,7 @@ export class SMTPService {
         pass: config.smtp.password,
       },
       tls: {
-        rejectUnauthorized: true,
+        rejectUnauthorized: false,
       },
     });
   }

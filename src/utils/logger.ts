@@ -2,6 +2,9 @@
  * Logger utility for Proton Mail MCP Server
  */
 
+import { appendFileSync } from 'fs';
+import { resolve, isAbsolute } from 'path';
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 interface LogEntry {
@@ -16,9 +19,24 @@ class LoggerClass {
   private debugMode: boolean = false;
   private logs: LogEntry[] = [];
   private maxLogs: number = 1000;
+  private logFile: string | undefined = process.env.LOG_FILE
+    ? isAbsolute(process.env.LOG_FILE)
+      ? process.env.LOG_FILE
+      : resolve(__dirname, '../..', process.env.LOG_FILE)
+    : undefined;
 
   setDebugMode(enabled: boolean): void {
     this.debugMode = enabled;
+  }
+
+  private writeToFile(line: string): void {
+    if (this.logFile) {
+      try {
+        appendFileSync(this.logFile, line + '\n');
+      } catch {
+        // ignore file write errors
+      }
+    }
   }
 
   private log(level: LogLevel, message: string, context?: string, data?: unknown): void {
@@ -41,16 +59,17 @@ class LoggerClass {
 
     const prefix = context ? `[${context}]` : '';
     const timestamp = entry.timestamp.toISOString();
+    const levelStr = level.toUpperCase();
+    const dataStr = data ? ` ${JSON.stringify(data)}` : '';
+    const line = `${timestamp} ${levelStr} ${prefix} ${message}${dataStr}`;
+
+    this.writeToFile(line);
 
     switch (level) {
       case 'debug':
-        console.error(`${timestamp} DEBUG ${prefix} ${message}`);
-        break;
       case 'info':
-        console.error(`${timestamp} INFO ${prefix} ${message}`);
-        break;
       case 'warn':
-        console.error(`${timestamp} WARN ${prefix} ${message}`);
+        console.error(`${timestamp} ${levelStr} ${prefix} ${message}`);
         break;
       case 'error':
         console.error(`${timestamp} ERROR ${prefix} ${message}`, data || '');
